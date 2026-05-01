@@ -1,0 +1,564 @@
+--Criando a tabela his_casos_trabalhados com todos os dados em texto para evitar rejeição. Tabela STAGING
+
+CREATE TABLE hist_casos_trabalhados
+(
+	id_caso VARCHAR(255),
+	pais VARCHAR(255),
+	canal_entrada VARCHAR(255),
+	status VARCHAR(255),
+	resolucao VARCHAR(255),
+	motivo_chamador VARCHAR(255),
+	nome_agente VARCHAR(255),
+	nome_supe VARCHAR(255),
+	data_hora_criacao VARCHAR(255),
+	data_hora_atualizacao VARCHAR(255),
+	data_hora_fechamento VARCHAR(255)
+);
+
+
+--importar o arquivo CSV com separador ';'
+
+
+--Criando tabelas DIMENSÃO
+
+--dim_pais
+
+CREATE TABLE dim_pais AS
+	SELECT DISTINCT 
+		UPPER(TRIM(COALESCE(pais,'(NAO INFORMADO)')))::VARCHAR(15) AS pais
+	FROM hist_casos_trabalhados;
+
+ALTER TABLE dim_pais
+	ADD COLUMN id_pais SERIAL PRIMARY KEY;
+
+ALTER TABLE dim_pais
+	ADD CONSTRAINT uk_pais UNIQUE (pais);
+
+--dim_canal_entrada
+
+CREATE TABLE dim_canal_entrada AS
+	SELECT DISTINCT 
+		UPPER(TRIM(COALESCE(canal_entrada, '(NAO INFORMADO)')))::VARCHAR(30) AS canal_entrada
+	FROM hist_casos_trabalhados;
+
+ALTER TABLE dim_canal_entrada
+	ADD COLUMN id_canal_entrada SERIAL PRIMARY KEY;
+
+ALTER TABLE dim_canal_entrada
+	ADD CONSTRAINT uk_canal_entrada UNIQUE (canal_entrada);
+
+
+--dim_status
+
+CREATE TABLE dim_status AS
+	SELECT DISTINCT
+		UPPER(TRIM(COALESCE(status, '(NAO INFORMADO)')))::VARCHAR(50) AS status
+	FROM hist_casos_trabalhados;
+
+ALTER TABLE dim_status
+	ADD COLUMN id_status SERIAL PRIMARY KEY;
+
+ALTER TABLE dim_status
+	ADD CONSTRAINT uk_status UNIQUE (status);
+
+--dim_motivo_chamado
+
+CREATE TABLE dim_motivo_chamado AS
+	SELECT DISTINCT 
+		UPPER(TRIM(COALESCE(motivo_chamador, '(NAO INFORMADO)')))::VARCHAR(255) AS motivo_chamado
+	FROM hist_casos_trabalhados;
+
+ALTER TABLE dim_motivo_chamado
+	ADD COLUMN id_motivo_chamado SERIAL PRIMARY KEY;
+
+ALTER TABLE dim_motivo_chamado
+	ADD CONSTRAINT uk_motivo_chamado UNIQUE (motivo_chamado);
+
+--dim_funcionario
+
+CREATE TABLE dim_funcionario AS
+	SELECT DISTINCT
+		UPPER(TRIM(COALESCE(nome_agente, '(NAO INFORMADO)')))::VARCHAR(255) AS funcionario
+	FROM hist_casos_trabalhados;
+
+ALTER TABLE dim_funcionario
+	ADD COLUMN id_funcionario SERIAL PRIMARY KEY;
+
+ALTER TABLE dim_funcionario
+	ADD CONSTRAINT uk_funcionario UNIQUE (funcionario);
+
+
+--dim_supervisor
+
+CREATE TABLE dim_supervisor AS
+	SELECT DISTINCT
+		UPPER(TRIM(COALESCE(nome_supe, '(NAO INFORMADO)')))::VARCHAR(255) AS supervisor
+	FROM hist_casos_trabalhados;
+
+ALTER TABLE dim_supervisor
+	ADD COLUMN id_supervisor SERIAL PRIMARY KEY;
+
+ALTER TABLE dim_supervisor
+	ADD CONSTRAINT uk_supervisor UNIQUE (supervisor);
+
+
+--dim_calendario
+
+CREATE TABLE dim_calendario AS
+	SELECT DISTINCT
+	
+		TO_CHAR(data_ref, 'YYYYMMDD')::INT AS id_calendario,
+		data_ref::DATE AS data,
+
+	    -- Atributos de Ano
+	    EXTRACT(YEAR  FROM data_ref)::INT AS ano,
+	
+	    -- Atributos de Trimestre
+	    EXTRACT(QUARTER FROM data_ref)::INT AS numero_trimestre,
+	    'T' || EXTRACT(QUARTER FROM data_ref)::INT AS trimestre,
+	
+	    -- Atributos de Mês
+	    EXTRACT(MONTH FROM data_ref)::INT AS numero_mes,
+	    TO_CHAR(data_ref, 'TMMonth') AS nome_mes,
+	    TO_CHAR(data_ref, 'TMMon') AS abrev_mes,
+	    TO_CHAR(data_ref, 'YYYY-MM') AS ano_mes,
+	
+	    -- Atributos de Semana
+	    EXTRACT(WEEK  FROM data_ref)::INT AS numero_semana_ano,
+	    EXTRACT(DOW   FROM data_ref)::INT AS numero_dia_semana,   -- 0=Dom … 6=Sáb
+	    TO_CHAR(data_ref, 'TMDay') AS nome_dia_semana,
+	    TO_CHAR(data_ref, 'TMDy') AS abrev_dia_Semana,
+	
+	    -- Atributos de Dia
+	    EXTRACT(DAY   FROM data_ref)::INT AS dia,
+	    EXTRACT(DOY   FROM data_ref)::INT AS dia_do_ano,
+	
+	    -- Flag fim de semana
+	    CASE
+	        WHEN EXTRACT(DOW FROM data_ref) IN (0, 6) THEN TRUE
+	        ELSE FALSE
+	    END  AS flag_fim_de_semana
+
+
+	FROM (
+		SELECT DISTINCT
+			TO_TIMESTAMP(data_hora_criacao, 'DD/MM/YYYY HH24:MI') AS data_ref
+		FROM hist_casos_trabalhados
+		WHERE data_hora_criacao IS NOT NULL
+	) sub
+ORDER BY id_calendario;
+
+ALTER TABLE dim_calendario
+	ADD CONSTRAINT pk_id_calendario PRIMARY KEY (id_calendario);
+	
+---------------------------
+-- Criação da tabela fato_casos
+------------------------
+--colunas da tabela: 
+--ids: id_pais, id_canal_entrada, id_status, id_motivo_chamado, id_funcionario, id_supervisor, id_calendario
+--indicadores: 
+	--qtd_total_casos
+	--resolucao_yes
+	--resolucao_no
+	--total_casos_fechados (Status = 'DONE')
+	--total_casos_abertos (Status <> 'DONE')
+	--tempo_medio_atualizacao_hora
+	--tempo_medio_fechamento_horas
+	--soma_horas_atualizacao,
+	--qtd_com_atualizacao,
+	--qtd_com_fechamento
+
+----------------------
+--Etapas
+
+	--1: CTE 'base' para:
+		--converter as datas (from hist_casos_trabalhados) de varchar -> timestamp
+		-- filtrar placeholder 01/01/1900 00:00'
+		---tratar os demais campos (exceto id_caso) com UPPER(TRIM(COALESCE))
+		
+	--2: CTE 'com_fks': join de 'base' com todas as FK das tabelas dimensão
+		--gerar FK id_calendario da mesma forma que é gerada na tabela dimensão (timestamp -> CHAR (YYYYMMDD) -> INT)
+
+	--3: Agrupar as IDs e métricas na tabela fato.
+	--4: adicionar id_fato e índices
+	--5: adicionar FKs explíctas
+---------------------
+CREATE TABLE fato_casos AS
+-----1
+	WITH
+		base AS(
+			SELECT
+				TO_TIMESTAMP(data_hora_criacao, 'DD/MM/YYYY HH24:MI') AS data_hora_criacao_ts,
+				TO_TIMESTAMP(data_hora_atualizacao, 'DD/MM/YYYY HH24:MI') AS data_hora_atualizacao_ts,
+			
+				NULLIF(
+				 	TO_TIMESTAMP(h.data_hora_fechamento, 'DD/MM/YYYY HH24:MI'),
+					TO_TIMESTAMP('01/01/1900 00:00', 'DD/MM/YYYY HH24:MI'))
+				 	AS data_hora_fechamento_ts,                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   
+									
+
+				UPPER(TRIM(COALESCE(pais,'(NAO INFORMADO)'))) AS pais_norm,
+				UPPER(TRIM(COALESCE(canal_entrada,'(NAO INFORMADO)'))) AS canal_entrada_norm,
+				UPPER(TRIM(COALESCE(status,'(NAO INFORMADO)'))) AS status_norm,
+				UPPER(TRIM(COALESCE(resolucao,'(NAO INFORMADO)'))) AS resolucao_norm,
+				UPPER(TRIM(COALESCE(motivo_chamador,'(NAO INFORMADO)'))) AS motivo_chamador_norm,
+				UPPER(TRIM(COALESCE(nome_agente,'(NAO INFORMADO)'))) AS nome_agente_norm,
+				UPPER(TRIM(COALESCE(nome_supe,'(NAO INFORMADO)'))) AS nome_supe_norm
+			FROM 
+				hist_casos_trabalhados h
+			WHERE
+				h.data_hora_criacao IS NOT NULL
+			),
+------2
+
+	com_fks AS(
+		SELECT
+			b.*,
+			ce.id_canal_entrada,
+			f.id_funcionario,
+			mc.id_motivo_chamado,
+			p.id_pais,
+			s.id_status,
+			sp.id_supervisor,
+			TO_CHAR(data_hora_criacao_ts, 'YYYYMMDD')::INT AS id_calendario
+
+		FROM base b
+		LEFT JOIN dim_pais p ON p.pais = b.pais_norm
+		LEFT JOIN dim_canal_entrada ce ON ce.canal_entrada = b.canal_entrada_norm
+		LEFT JOIN dim_funcionario f ON f.funcionario = b.nome_agente_norm
+		LEFT JOIN dim_motivo_chamado mc ON mc.motivo_chamado = b.motivo_chamador_norm
+		LEFT JOIN dim_status s ON s.status = b.status_norm
+		LEFT JOIN dim_supervisor sp ON sp.supervisor = b.nome_supe_norm
+		)
+		
+--------3
+
+	SELECT 
+		id_pais, id_canal_entrada, id_status, id_motivo_chamado, id_funcionario, id_supervisor, id_calendario,
+
+		COUNT(*) AS qtd_total_casos,
+		
+		COUNT(*) FILTER(WHERE resolucao_norm = 'YES') AS resolucao_yes,
+		COUNT(*) FILTER(WHERE resolucao_norm = 'NO') AS resolucao_no,
+
+			
+		COUNT(*) FILTER(WHERE status_norm = 'DONE') AS total_casos_fechados,
+		COUNT(*) FILTER (WHERE status_norm <> 'DONE') AS total_casos_abertos,
+
+		
+		SUM(
+			EXTRACT(EPOCH FROM (data_hora_atualizacao_ts - data_hora_criacao_ts)) / 3600
+		)
+		FILTER (WHERE data_hora_atualizacao_ts IS NOT NULL)::NUMERIC
+		AS soma_horas_atualizacao,
+
+		SUM(
+			EXTRACT(EPOCH FROM (data_hora_fechamento_ts - data_hora_criacao_ts)) / 3600
+		)
+		FILTER (WHERE data_hora_fechamento_ts IS NOT NULL)::NUMERIC
+		AS soma_horas_fechamento,
+
+
+		COUNT(
+			EXTRACT(EPOCH FROM (data_hora_atualizacao_ts - data_hora_criacao_ts)) / 3600
+		)
+		FILTER (WHERE data_hora_atualizacao_ts IS NOT NULL)::NUMERIC
+		AS qtd_com_atualizacao,
+
+		
+		COUNT(
+			EXTRACT(EPOCH FROM (data_hora_fechamento_ts - data_hora_criacao_ts)) / 3600
+		)
+		FILTER (WHERE data_hora_fechamento_ts IS NOT NULL)::NUMERIC
+		AS qtd_com_fechamento
+
+	
+	FROM com_fks
+
+	GROUP BY
+	  			id_calendario,
+			    id_pais,
+			    id_canal_entrada,
+			    id_status,
+			    id_motivo_chamado,
+			    id_funcionario,
+			    id_supervisor
+
+	ORDER BY
+	    id_calendario,
+	    id_pais,
+	    id_canal_entrada;
+
+
+------4
+ALTER TABLE fato_casos
+	ADD COLUMN id_fato SERIAL PRIMARY KEY;
+
+CREATE INDEX idx_fato_calendario   ON fato_casos (id_calendario);
+CREATE INDEX idx_fato_pais         ON fato_casos (id_pais);
+CREATE INDEX idx_fato_canal        ON fato_casos (id_canal_entrada);
+CREATE INDEX idx_fato_status       ON fato_casos (id_status);
+CREATE INDEX idx_fato_moti         ON fato_casos (id_motivo_chamado);
+CREATE INDEX idx_fato_funcionario  ON fato_casos (id_funcionario);
+CREATE INDEX idx_fato_supervisor   ON fato_casos (id_supervisor);
+
+---5
+
+ALTER TABLE fato_casos
+	ADD CONSTRAINT fk_fato_calendario
+		FOREIGN KEY (id_calendario) REFERENCES dim_calendario (id_calendario),
+	
+	ADD CONSTRAINT fk_fato_pais
+		FOREIGN KEY (id_pais) REFERENCES dim_pais (id_pais),
+	
+	ADD CONSTRAINT fk_fato_canal
+		FOREIGN KEY (id_canal_entrada) REFERENCES dim_canal_entrada (id_canal_entrada),
+
+	ADD CONSTRAINT fk_fato_status
+        FOREIGN KEY (id_status) REFERENCES dim_status (id_status),
+    
+	ADD CONSTRAINT fk_fato_motivo
+        FOREIGN KEY (id_motivo_chamado) REFERENCES dim_motivo_chamado(id_motivo_chamado),
+    
+	ADD CONSTRAINT fk_fato_funcionario
+        FOREIGN KEY (id_funcionario) REFERENCES dim_funcionario (id_funcionario),
+    
+	ADD CONSTRAINT fk_fato_supervisor
+        FOREIGN KEY (id_supervisor) REFERENCES dim_supervisor (id_supervisor);
+
+
+--Procedure: sp_atualiza_dw
+--Banco: casos_atendimento
+DROP PROCEDURE IF EXISTS sp_atualiza_dw();
+
+CREATE PROCEDURE sp_atualiza_dw()
+LANGUAGE plpgsql
+AS $$
+BEGIN
+--1/9 limpeza da tabela fato_casos - FK impede a limpeza das DIM
+
+	RAISE NOTICE '1/9 Limpando tabela fato_casos';
+	TRUNCATE TABLE fato_casos RESTART IDENTITY;
+
+--2/9 Full refresh da tabela dim_calendario
+
+	RAISE NOTICE '2/9 Atualizando dim_calendario';
+	TRUNCATE TABLE dim_calendario RESTART IDENTITY CASCADE;
+
+	INSERT INTO dim_calendario(
+		id_calendario,
+		data,
+		ano,
+		numero_trimestre,
+		trimestre,
+		numero_mes,
+		nome_mes,
+		abrev_mes,
+		ano_mes,
+		numero_semana_ano,
+		numero_dia_semana,
+		nome_dia_semana,
+		abrev_dia_semana,
+		dia,
+		dia_do_ano,
+		flag_fim_de_semana
+		)
+		SELECT DISTINCT
+			TO_CHAR(data_ref, 'YYYYMMDD')::INT,
+			data_ref::DATE,
+			    -- Atributos de Ano
+		    EXTRACT(YEAR  FROM data_ref)::INT,
+			    -- Atributos de Trimestre
+		    EXTRACT(QUARTER FROM data_ref)::INT,
+		    'T' || EXTRACT(QUARTER FROM data_ref)::INT,
+			    -- Atributos de Mês
+		    EXTRACT(MONTH FROM data_ref)::INT,
+		    TO_CHAR(data_ref, 'TMMonth'),
+		    TO_CHAR(data_ref, 'TMMon'), 
+			TO_CHAR(data_ref, 'YYYY-MM'),
+			    -- Atributos de Semana
+		    EXTRACT(WEEK  FROM data_ref)::INT,
+		    EXTRACT(DOW   FROM data_ref)::INT,   -- 0=Dom … 6=Sáb
+		    TO_CHAR(data_ref, 'TMDay'),
+		    TO_CHAR(data_ref, 'TMDy'),
+			    -- Atributos de Dia
+		    EXTRACT(DAY   FROM data_ref)::INT,
+		    EXTRACT(DOY   FROM data_ref)::INT,
+			    -- Flag fim de semana
+		    CASE
+		        WHEN EXTRACT(DOW FROM data_ref) IN (0, 6) THEN TRUE
+		        ELSE FALSE
+		    END 
+		
+		FROM (
+			SELECT DISTINCT
+				TO_TIMESTAMP(data_hora_criacao, 'DD/MM/YYYY HH24:MI') AS data_ref
+			FROM hist_casos_trabalhados
+			WHERE data_hora_criacao IS NOT NULL
+		) sub
+		ORDER BY TO_CHAR(data_ref, 'YYYYMMDD')::INT
+		ON CONFLICT (id_calendario) DO NOTHING;
+		
+---atualizando dim_pais
+
+	RAISE NOTICE '3/9 Atualizando dim_pais';
+
+	TRUNCATE TABLE dim_pais RESTART IDENTITY CASCADE;
+
+	INSERT INTO dim_pais(pais)
+		SELECT DISTINCT 
+			UPPER(TRIM(COALESCE(pais,'(NAO INFORMADO)')))::VARCHAR(15)
+		FROM hist_casos_trabalhados
+	ON CONFLICT (pais) DO NOTHING;
+
+---atualizando dim_canal_entrada
+
+	RAISE NOTICE '4/9 atualizando dim_canal_entrada';
+	TRUNCATE TABLE dim_canal_entrada RESTART IDENTITY CASCADE;
+	INSERT INTO dim_canal_entrada(canal_entrada)
+		SELECT DISTINCT
+			UPPER(TRIM(COALESCE(canal_entrada, '(NAO INFORMADO)')))::VARCHAR(30)
+		FROM hist_casos_trabalhados
+	ON CONFLICT (canal_entrada) DO NOTHING ;
+
+---atualizando dim_status
+
+	RAISE NOTICE '5/9 atualizado dim_status';
+	TRUNCATE TABLE dim_status RESTART IDENTITY CASCADE;
+	INSERT INTO dim_status (status)
+		SELECT DISTINCT
+			UPPER(TRIM(COALESCE(status, '(NAO INFORMADO)')))::VARCHAR(50)
+		FROM hist_casos_trabalhados
+	ON CONFLICT (status) DO NOTHING ;
+
+--atualizando dim_motivo_chamado
+	RAISE NOTICE '6/9 atualizandoo dim_motivo_chamado';
+	TRUNCATE TABLE dim_motivo_chamado RESTART IDENTITY CASCADE;
+	INSERT INTO dim_motivo_chamado (motivo_chamado)
+		SELECT DISTINCT 
+			UPPER(TRIM(COALESCE(motivo_chamador, '(NAO INFORMADO)')))::VARCHAR(255)
+		FROM hist_casos_trabalhados
+	ON CONFLICT (motivo_chamado) DO NOTHING;
+
+---atualizando dim_funcionario
+	RAISE NOTICE '7/9 atualizando dim_funcionario';
+	TRUNCATE TABLE dim_funcionario RESTART IDENTITY CASCADE;
+	INSERT INTO dim_funcionario (funcionario)
+		SELECT DISTINCT 
+			UPPER(TRIM(COALESCE(nome_agente, '(NAO INFORMADO)')))::VARCHAR(255)
+		FROM hist_casos_trabalhados
+	ON CONFLICT (funcionario) DO NOTHING;
+
+---atualizando dim_supervisor
+	RAISE NOTICE '8/9 atualizando dim_supervisor';
+	TRUNCATE TABLE dim_supervisor RESTART IDENTITY CASCADE;
+	INSERT INTO dim_supervisor (supervisor)
+		SELECT DISTINCT 
+			UPPER(TRIM(COALESCE(nome_supe, '(NAO INFORMADO)')))::VARCHAR(255)
+		FROM hist_casos_trabalhados
+	ON CONFLICT (supervisor) DO NOTHING;
+	
+---atualizando fato_casos
+	RAISE NOTICE '9/9 atualizando fato_casos';
+	INSERT INTO fato_casos
+		(id_pais, id_canal_entrada, id_status, id_motivo_chamado, id_funcionario, id_supervisor, id_calendario, 
+	qtd_total_casos, resolucao_yes, resolucao_no, total_casos_fechados, total_casos_abertos, 
+	soma_horas_atualizacao, soma_horas_fechamento, 
+	qtd_com_atualizacao, qtd_com_fechamento)
+	
+		WITH
+			base AS(
+				SELECT
+					TO_TIMESTAMP(data_hora_criacao, 'DD/MM/YYYY HH24:MI') AS data_hora_criacao_ts,
+					TO_TIMESTAMP(data_hora_atualizacao, 'DD/MM/YYYY HH24:MI') AS data_hora_atualizacao_ts,
+				
+					NULLIF(
+					 	TO_TIMESTAMP(h.data_hora_fechamento, 'DD/MM/YYYY HH24:MI'),
+						TO_TIMESTAMP('01/01/1900 00:00', 'DD/MM/YYYY HH24:MI'))
+					 	AS data_hora_fechamento_ts,                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  
+										
+	
+					UPPER(TRIM(COALESCE(pais,'(NAO INFORMADO)'))) AS pais_norm,
+					UPPER(TRIM(COALESCE(canal_entrada,'(NAO INFORMADO)'))) AS canal_entrada_norm,
+					UPPER(TRIM(COALESCE(status,'(NAO INFORMADO)'))) AS status_norm,
+					UPPER(TRIM(COALESCE(resolucao,'(NAO INFORMADO)'))) AS resolucao_norm,
+					UPPER(TRIM(COALESCE(motivo_chamador,'(NAO INFORMADO)'))) AS motivo_chamador_norm,
+					UPPER(TRIM(COALESCE(nome_agente,'(NAO INFORMADO)'))) AS nome_agente_norm,
+					UPPER(TRIM(COALESCE(nome_supe,'(NAO INFORMADO)'))) AS nome_supe_norm
+				FROM 
+					hist_casos_trabalhados h
+				WHERE
+					h.data_hora_criacao IS NOT NULL
+				),
+		com_fks AS(
+			SELECT
+				b.*,
+				ce.id_canal_entrada,
+				f.id_funcionario,
+				mc.id_motivo_chamado,
+				p.id_pais,
+				s.id_status,
+				sp.id_supervisor,
+				TO_CHAR(data_hora_criacao_ts, 'YYYYMMDD')::INT AS id_calendario
+		
+			FROM base b
+			LEFT JOIN dim_pais p ON p.pais = b.pais_norm
+			LEFT JOIN dim_canal_entrada ce ON ce.canal_entrada = b.canal_entrada_norm
+			LEFT JOIN dim_funcionario f ON f.funcionario = b.nome_agente_norm
+			LEFT JOIN dim_motivo_chamado mc ON mc.motivo_chamado = b.motivo_chamador_norm
+			LEFT JOIN dim_status s ON s.status = b.status_norm
+			LEFT JOIN dim_supervisor sp ON sp.supervisor = b.nome_supe_norm
+			)
+	
+		SELECT 
+			id_pais, id_canal_entrada, id_status,  id_motivo_chamado, id_funcionario, id_supervisor, id_calendario,
+	
+			COUNT(*) ,
+			COUNT(*) FILTER(WHERE resolucao_norm = 'YES'),
+			COUNT(*) FILTER(WHERE resolucao_norm = 'NO'),
+												
+			COUNT(*) FILTER(WHERE status_norm = 'DONE'),
+			COUNT(*) FILTER (WHERE status_norm <> 'DONE'),
+							
+			SUM(
+				EXTRACT(EPOCH FROM (data_hora_atualizacao_ts - data_hora_criacao_ts)) / 3600			)
+				FILTER (WHERE data_hora_atualizacao_ts IS NOT NULL)::NUMERIC,
+	
+			SUM(
+				EXTRACT(EPOCH FROM (data_hora_fechamento_ts - data_hora_criacao_ts)) / 3600)
+				FILTER (WHERE data_hora_fechamento_ts IS NOT NULL)::NUMERIC,
+	
+			COUNT(
+				EXTRACT(EPOCH FROM (data_hora_atualizacao_ts - data_hora_criacao_ts)) / 3600)
+				FILTER (WHERE data_hora_atualizacao_ts IS NOT NULL)::NUMERIC,
+			
+			COUNT(
+				EXTRACT(EPOCH FROM (data_hora_fechamento_ts - data_hora_criacao_ts)) / 3600
+				)FILTER (WHERE data_hora_fechamento_ts IS NOT NULL)::NUMERIC
+			
+		FROM com_fks
+		GROUP BY
+		    id_calendario,
+		    id_pais,
+		    id_canal_entrada,
+		    id_status,
+		    id_motivo_chamado,
+		    id_funcionario,
+		    id_supervisor
+	
+		ORDER BY
+		    id_calendario,
+		    id_pais,
+		    id_canal_entrada;
+
+RAISE NOTICE '✔ sp_atualiza_dw concluída com sucesso em %', clock_timestamp();
+			
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE EXCEPTION '✖ sp_atualiza_dw falhou na etapa em execução. Detalhes: % — %',
+            SQLERRM, SQLSTATE;
+
+END;
+$$;
+
+
